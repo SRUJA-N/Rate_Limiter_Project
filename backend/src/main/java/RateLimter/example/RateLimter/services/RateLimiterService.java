@@ -1,27 +1,30 @@
 package RateLimter.example.RateLimter.services;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import java.util.*;
 @Service
 public class RateLimiterService {
-    int LIMIT=5;
-    long WINDOWSIZE=10*1000;
-    long current=System.currentTimeMillis();
 
-    Map<String,Integer> count=new HashMap<>();
-    public boolean axcess( String userId){
-         long now=System.currentTimeMillis();
-         if(now-current>WINDOWSIZE){
-             count.clear();
-             current=now;
-         }
 
-        int currentCount=count.getOrDefault(userId,0);
+    @Value("${rate.limiter.capacity}")
+    private int capacity;
 
-        if(currentCount>=LIMIT){
-            return false;
+    @Value("${rate.limiter.refill-rate}")
+    private int refill;
+
+    private final Map<String,TokenBucket> buckets=new HashMap<>();
+    public boolean access( String userId){
+
+        TokenBucket bucket=buckets.get(userId);
+
+        if(bucket==null){
+            bucket = new TokenBucket(capacity,refill);
+            buckets.put(userId,bucket);
+
         }
-        count.put(userId,currentCount+1);
-        return true;
+
+        return bucket.allowRefil();
+
     }
 }

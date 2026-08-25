@@ -15,10 +15,7 @@ public class Controllers {
 
     @GetMapping("/hello")
     public String print(){
-        String demo="suman";
-       if(rateLimiterService.axcess(demo)){
            return "request Accepted";
-       }
-       return "too many request 429 error";
+
     }
 }
