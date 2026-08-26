@@ -18,8 +18,8 @@ public class RateLimiterService {
     @Value("${rate.limiter.ttl}")
     private int ttl;
     private final StringRedisTemplate stringRedisTemplate;
-    private final DefaultRedisScript<Long> defaultRedisScript;
-    public RateLimiterService(StringRedisTemplate stringRedisTemplate, DefaultRedisScript<Long> defaultRedisScript) {
+    private final DefaultRedisScript<List> defaultRedisScript;
+    public RateLimiterService(StringRedisTemplate stringRedisTemplate, DefaultRedisScript<List> defaultRedisScript) {
         this.stringRedisTemplate = stringRedisTemplate;
         this.defaultRedisScript = defaultRedisScript;
     }
@@ -31,12 +31,12 @@ public class RateLimiterService {
 
 
 
-    public boolean access(String userId) {
+    public RateLimitResult access(String userId) {
 
         String tokenKey = "rate-limiter:" + userId + ":tokens";
         String refillKey = "rate-limiter:" + userId + ":last-refill";
 
-        Long result=stringRedisTemplate.execute(
+        List<Long> result=stringRedisTemplate.execute(
                 defaultRedisScript,
                 List.of(tokenKey,refillKey),
                 String.valueOf(capacity),
@@ -44,7 +44,16 @@ public class RateLimiterService {
                 String.valueOf(System.currentTimeMillis()),
                 String.valueOf(ttl)
         );
-        return result!=null && result==1;
+        System.out.println("Lua result = " + result);
+
+        if(result==null || result.size()<3){
+            return new RateLimitResult(false,0L,1);
+        }
+        boolean allowed=result.get(0).longValue()==1L;
+        long remainingToken = result.get(1).longValue();
+        long retryAfterSeconds = result.get(2).longValue();
+
+        return new RateLimitResult(allowed,remainingToken,retryAfterSeconds);
 
     }
 }
