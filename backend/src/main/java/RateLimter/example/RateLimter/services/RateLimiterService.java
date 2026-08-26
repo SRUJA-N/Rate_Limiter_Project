@@ -1,5 +1,6 @@
 package RateLimter.example.RateLimter.services;
 
+import RateLimter.example.RateLimter.config.RateLimiterProperties;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -9,20 +10,16 @@ import java.util.*;
 public class RateLimiterService {
 
 
-    @Value("${rate.limiter.capacity}")
-    private int capacity;
+   private final RateLimiterProperties properties;
 
-    @Value("${rate.limiter.refill-rate}")
-    private int refill;
-
-    @Value("${rate.limiter.ttl}")
-    private int ttl;
-    private final StringRedisTemplate stringRedisTemplate;
-    private final DefaultRedisScript<List> defaultRedisScript;
-    public RateLimiterService(StringRedisTemplate stringRedisTemplate, DefaultRedisScript<List> defaultRedisScript) {
+    public RateLimiterService(RateLimiterProperties properties, StringRedisTemplate stringRedisTemplate, DefaultRedisScript<List> defaultRedisScript) {
+        this.properties = properties;
         this.stringRedisTemplate = stringRedisTemplate;
         this.defaultRedisScript = defaultRedisScript;
     }
+
+    private final StringRedisTemplate stringRedisTemplate;
+    private final DefaultRedisScript<List> defaultRedisScript;
 
 
 
@@ -39,10 +36,10 @@ public class RateLimiterService {
         List<Long> result=stringRedisTemplate.execute(
                 defaultRedisScript,
                 List.of(tokenKey,refillKey),
-                String.valueOf(capacity),
-                String.valueOf(refill),
+                String.valueOf(properties.getCapacity()),
+                String.valueOf(properties.getRefillRate()),
                 String.valueOf(System.currentTimeMillis()),
-                String.valueOf(ttl)
+                String.valueOf(properties.getTtl())
         );
         System.out.println("Lua result = " + result);
 
