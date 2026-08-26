@@ -2,6 +2,7 @@ package RateLimter.example.RateLimter.services;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import java.util.*;
 @Service
@@ -14,9 +15,14 @@ public class RateLimiterService {
     @Value("${rate.limiter.refill-rate}")
     private int refill;
     private final StringRedisTemplate stringRedisTemplate;
-    public RateLimiterService(StringRedisTemplate stringRedisTemplate) {
+    private final DefaultRedisScript<Long> defaultRedisScript;
+    public RateLimiterService(StringRedisTemplate stringRedisTemplate, DefaultRedisScript<Long> defaultRedisScript) {
         this.stringRedisTemplate = stringRedisTemplate;
+        this.defaultRedisScript = defaultRedisScript;
     }
+
+
+
 
 
 
