@@ -37,7 +37,8 @@ public class RateLimiterFilter implements Filter {
         } else {
 
             httpResponse.setStatus(429);
-            response.getWriter().write("too many requests");
+            httpResponse.setHeader("Retry-After","1");
+            response.getWriter().write(  "{\"error\":\"Too many requests\"}");
         }
     }
 }
