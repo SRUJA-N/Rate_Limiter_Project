@@ -14,6 +14,9 @@ public class RateLimiterService {
 
     @Value("${rate.limiter.refill-rate}")
     private int refill;
+
+    @Value("${rate.limiter.ttl}")
+    private int ttl;
     private final StringRedisTemplate stringRedisTemplate;
     private final DefaultRedisScript<Long> defaultRedisScript;
     public RateLimiterService(StringRedisTemplate stringRedisTemplate, DefaultRedisScript<Long> defaultRedisScript) {
@@ -27,66 +30,21 @@ public class RateLimiterService {
 
 
 
-    private final Map<String,TokenBucket> buckets=new HashMap<>();
+
     public boolean access(String userId) {
 
         String tokenKey = "rate-limiter:" + userId + ":tokens";
         String refillKey = "rate-limiter:" + userId + ":last-refill";
 
-        String tokens = stringRedisTemplate.opsForValue().get(tokenKey);
-
-        // First request from this user
-        if (tokens == null) {
-
-            stringRedisTemplate.opsForValue()
-                    .set(tokenKey, String.valueOf(capacity));
-
-            stringRedisTemplate.opsForValue()
-                    .set(refillKey, String.valueOf(System.currentTimeMillis()));
-
-            tokens = String.valueOf(capacity);
-        }
-
-        long availableTokens = Long.parseLong(tokens);
-
-        long lastRefill = Long.parseLong(
-                stringRedisTemplate.opsForValue().get(refillKey)
+        Long result=stringRedisTemplate.execute(
+                defaultRedisScript,
+                List.of(tokenKey,refillKey),
+                String.valueOf(capacity),
+                String.valueOf(refill),
+                String.valueOf(System.currentTimeMillis()),
+                String.valueOf(ttl)
         );
+        return result!=null && result==1;
 
-        long currentTime = System.currentTimeMillis();
-
-        long timeElapsed = currentTime - lastRefill;
-
-        long secondsPassed = timeElapsed / 1000;
-
-        long tokensToAdd = secondsPassed * refill;
-
-        // Refill
-        if (tokensToAdd > 0) {
-
-            long newTokenCount = Math.min(
-                    capacity,
-                    availableTokens + tokensToAdd
-            );
-
-            stringRedisTemplate.opsForValue()
-                    .set(tokenKey, String.valueOf(newTokenCount));
-
-            stringRedisTemplate.opsForValue()
-                    .set(refillKey, String.valueOf(currentTime));
-
-            availableTokens = newTokenCount;
-        }
-
-        // No token available
-        if (availableTokens <= 0) {
-            return false;
-        }
-
-        // Consume one token
-        stringRedisTemplate.opsForValue()
-                .decrement(tokenKey);
-
-        return true;
     }
 }
