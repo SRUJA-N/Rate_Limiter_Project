@@ -53,12 +53,18 @@ public class RateLimiterFilter implements Filter {
 
             httpResponse.setStatus(429);
 
-            httpResponse.setHeader(
-                    "Retry-After",
-                    String.valueOf(result.getRetryAfterSeconds())
-            );
+            httpResponse.setContentType("application/json");
+            httpResponse.setCharacterEncoding("UTF-8");
 
-            httpResponse.getWriter().write("Too many requests");
+            String responseBody =
+                    "{"
+                            + "\"error\":\"Too many requests\","
+                            + "\"status\":429,"
+                            + "\"retryAfter\":"
+                            + result.getRetryAfterSeconds()
+                            + "}";
+
+            httpResponse.getWriter().write(responseBody);
         }
     }
 }
