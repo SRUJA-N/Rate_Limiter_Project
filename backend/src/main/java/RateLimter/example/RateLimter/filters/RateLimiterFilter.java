@@ -37,34 +37,60 @@ public class RateLimiterFilter implements Filter {
 
         String userId = httpRequest.getRemoteAddr();
 
-        RateLimitResult result =
-                rateLimiterService.access(userId);
+        try {
 
-        httpResponse.setHeader(
-                "X-RateLimit-Remaining",
-                String.valueOf(result.getRemaining())
-        );
+            RateLimitResult result =
+                    rateLimiterService.access(userId);
 
-        if (result.isResult()) {
+            httpResponse.setHeader(
+                    "X-RateLimit-Remaining",
+                    String.valueOf(result.getRemaining())
+            );
 
-            chain.doFilter(request, response);
+            if (result.isResult()) {
 
-        } else {
+                chain.doFilter(request, response);
 
-            httpResponse.setStatus(429);
+            } else {
+
+                httpResponse.setStatus(429);
+
+                httpResponse.setContentType("application/json");
+                httpResponse.setCharacterEncoding("UTF-8");
+
+                httpResponse.setHeader(
+                        "Retry-After",
+                        String.valueOf(result.getRetryAfterSeconds())
+                );
+
+                String responseBody =
+                        "{"
+                                + "\"error\":\"Too many requests\","
+                                + "\"status\":429,"
+                                + "\"retryAfter\":"
+                                + result.getRetryAfterSeconds()
+                                + "}";
+
+                httpResponse.getWriter().write(responseBody);
+            }
+
+        } catch (Exception e) {
+
+            // Redis is unavailable
+            httpResponse.setStatus(503);
 
             httpResponse.setContentType("application/json");
             httpResponse.setCharacterEncoding("UTF-8");
 
             String responseBody =
                     "{"
-                            + "\"error\":\"Too many requests\","
-                            + "\"status\":429,"
-                            + "\"retryAfter\":"
-                            + result.getRetryAfterSeconds()
+                            + "\"error\":\"Rate limiter temporarily unavailable\","
+                            + "\"status\":503,"
+                            + "\"message\":\"Please try again later\""
                             + "}";
 
             httpResponse.getWriter().write(responseBody);
         }
     }
+
 }
