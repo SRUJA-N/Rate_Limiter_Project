@@ -1,226 +1,210 @@
-# Distributed Rate Limiter
-
-A production-style distributed rate limiter built with **Spring Boot 3**, **Redis**, and **Lua Scripting**. This system implements the **Token Bucket Algorithm** to enforce rate limits globally across distributed application instances using a Spring Servlet Filter.
 
 ---
 
-## 📑 Overview & Architecture
+# 🚦 Distributed Rate Limiter
 
-In high-throughput distributed systems, protecting backend services from overload and abuse requires efficient rate limiting. Storing rate-limiting state in-memory on individual application nodes fails in distributed environments because state is not shared across instances.
+> A production-style distributed rate limiter built with **Spring Boot 3, Redis, and Lua scripting**.  
+> Implements the **Token Bucket Algorithm** with atomic distributed state management, HTTP-level rate limiting, concurrency protection, Docker deployment, and graceful Redis failure handling.
 
-This project offloads rate-limiting state management to a centralized **Redis** instance. To prevent race conditions and guarantee atomicity during concurrent token computations (read-modify-write cycles), the token bucket logic is executed atomically inside Redis via a **Lua script**.
+## 📌 Overview
 
-### System Architecture
+Rate limiting protects backend services from abuse and overload.
 
-```
-                       +-------------------------+
-                       |       HTTP Client       |
-                       +-------------------------+
-                                    |
-                                    v
-                       +-------------------------+
-                       |   RateLimiterFilter     |  (Extracts Client IP via RemoteAddr)
-                       +-------------------------+
-                                    |
-                    +---------------+---------------+
-                    |                               |
-           [ Allowed (200 OK) ]           [ Rate Limited (429) / Redis Error (503) ]
-                    |                               |
-                    v                               v
-        +-----------------------+       +------------------------+
-        | Controller Endpoint   |       |  JSON Error Response   |
-        |  (e.g., /hello)       |       |  + Custom Headers      |
-        +-----------------------+       +------------------------+
-                    ^
-                    | (Evaluates Token Bucket atomically)
-                    v
-        +-----------------------+
-        |  Redis + Lua Script   |
-        +-----------------------+
-```
+A simple in-memory rate limiter works for a single application instance, but breaks when the application runs across multiple servers because each server maintains its own request state.
 
----
+This project solves that problem by storing rate-limit state in **Redis** and executing the Token Bucket algorithm atomically using a **Lua script**.
 
-## 🔄 Request Flow
-
-1. **Request Interception**: `RateLimiterFilter` intercepts every incoming HTTP request before it reaches the controller.
-2. **Client Identification**: The filter extracts the client's IP address (`request.getRemoteAddr()`) to build the Redis key (`rate-limiter:<IP>`).
-3. **Atomic Evaluation**: The filter calls `RateLimiterService.access(userId)`, executing `rate-limiter.lua` on Redis with keys (`:tokens`, `:last-refill`) and arguments (`capacity`, `refillRate`, `currentTimeMillis`, `ttl`).
-4. **Decision & Response**:
-   - **Allowed (`200 OK`)**: Request proceeds through `chain.doFilter()`. The response includes header `X-RateLimit-Remaining`.
-   - **Exceeded (`429 Too Many Requests`)**: Execution stops in the filter. Returns HTTP 429 status, `Retry-After` header, `X-RateLimit-Remaining: 0`, and JSON body `{"error":"Too many requests","status":429,"retryAfter":...}`.
-   - **Redis Down / Failure**: Exception is caught in the filter, returning HTTP 503 status and JSON body `{"error":"Rate limiter temporarily unavailable","status":503,"message":"Please try again later"}`.
-
----
-
-## 📁 Project Structure
+### Key idea
 
 ```text
-Rate_Limiter/
-├── README.md
-└── backend/
-    ├── Dockerfile
-    ├── docker-compose.yml
-    ├── pom.xml
-    └── src/
-        ├── main/
-        │   ├── java/RateLimter/example/RateLimter/
-        │   │   ├── RateLimterApplication.java
-        │   │   ├── config/
-        │   │   │   ├── RateLimiterProperties.java
-        │   │   │   └── RedisConfig.java
-        │   │   ├── controllers/
-        │   │   │   └── Controllers.java
-        │   │   ├── filters/
-        │   │   │   └── RateLimiterFilter.java
-        │   │   └── services/
-        │   │       ├── RateLimitResult.java
-        │   │       └── RateLimiterService.java
-        │   └── resources/
-        │       ├── application.properties
-        │       └── rate-limiter.lua
-        └── test/
-            └── java/RateLimter/example/RateLimter/
-                └── RateLimiterServiceTest.java
+Without Redis
+
+Client
+   │
+   ▼
+App Instance 1 → 5 requests allowed
+App Instance 2 → 5 requests allowed
+
+Problem: Same client can bypass the global limit.
+```
+
+```text
+With Redis
+
+                 ┌──────────────┐
+                 │    Client    │
+                 └──────┬───────┘
+                        │
+          ┌─────────────▼─────────────┐
+          │   Spring Boot Instances   │
+          └─────────────┬─────────────┘
+                        │
+                        ▼
+              ┌─────────────────┐
+              │      Redis      │
+              │ Shared State +  │
+              │ Atomic Lua Logic│
+              └─────────────────┘
+```
+
+Redis becomes the shared source of truth for available tokens.
+
+---
+
+# 🏗️ Architecture
+
+```text
+                       ┌─────────────────┐
+                       │   HTTP Client   │
+                       └────────┬────────┘
+                                │
+                                ▼
+                    ┌───────────────────────┐
+                    │  RateLimiterFilter    │
+                    │                       │
+                    │ Extract Client IP     │
+                    └───────────┬───────────┘
+                                │
+                                ▼
+                    ┌───────────────────────┐
+                    │  RateLimiterService   │
+                    └───────────┬───────────┘
+                                │
+                                ▼
+                    ┌───────────────────────┐
+                    │     Redis + Lua       │
+                    │                       │
+                    │ Atomic Token Bucket   │
+                    └───────────┬───────────┘
+                                │
+                  ┌─────────────┴─────────────┐
+                  │                           │
+                  ▼                           ▼
+          ┌───────────────┐           ┌───────────────┐
+          │ Token Exists  │           │ Bucket Empty  │
+          │               │           │               │
+          │ Continue to   │           │ Return 429    │
+          │ Controller    │           │ immediately   │
+          └───────┬───────┘           └───────────────┘
+                  │
+                  ▼
+             HTTP 200 OK
 ```
 
 ---
 
-## ✨ Features Implemented
+# ⚙️ How the Token Bucket Works
 
-- **Token Bucket Algorithm**: Calculates available tokens dynamically based on elapsed time (`currentTime - lastRefill`) and refill rate.
-- **Distributed State Management**: Uses Redis (`StringRedisTemplate`) to maintain distributed tokens and refill state.
-- **Atomic Lua Scripting**: Executes `rate-limiter.lua` atomically inside Redis to eliminate race conditions.
-- **Configurable Bucket Parameters**: Capacity, refill rate, and key TTL managed via `@ConfigurationProperties(prefix = "rate.limiter")` with `@Validated` and `@Min(1)` constraints.
-- **Spring Servlet Filter**: Custom `RateLimiterFilter` intercepts requests globally before reaching controller endpoints.
-- **Client IP Identification**: Identifies clients using `httpRequest.getRemoteAddr()`.
-- **429 Too Many Requests Response**: Halted in filter when tokens are depleted.
-- **Retry-After Header**: Specifies seconds to wait before retrying.
-- **X-RateLimit-Remaining Header**: Exposes remaining bucket token count on responses.
-- **Structured JSON Error Responses**: Provides clear JSON payloads for rate limiting (429) and service unavailability (503).
-- **Graceful Failure Handling**: Exception in Redis connection bubbles to the filter and returns HTTP 503 Service Unavailable instead of crashing with 500.
-- **Validation**: Ensures configuration properties satisfy minimum requirements (`@Min(1)`).
-- **Unit & Concurrency Testing**: Includes unit tests, `MockMvc` integration tests, and 20-thread concurrent testing using `ExecutorService` and `CountDownLatch`.
-- **Spring Boot Actuator**: Health endpoint exposed at `/actuator/health`.
-- **SLF4J Logging**: Structured logging in `RateLimiterService` for debug and error events.
-- **Dockerized Spring Boot Application**: Containerized build using `eclipse-temurin:21-jre`.
-- **Dockerized Redis**: Containerized Redis instance with `healthcheck` (`redis-cli ping`).
-- **Docker Compose**: Orchestrates app and Redis containers with `depends_on` health status conditions.
-
----
-
-## ⚙️ Configuration Properties
-
-Configured via `backend/src/main/resources/application.properties`:
+The limiter is configured with:
 
 ```properties
-spring.application.name=RateLimter
-
-# Rate Limiter Settings
 rate.limiter.capacity=5
 rate.limiter.refill-rate=1
 rate.limiter.ttl=60
-
-# Redis Settings
-spring.data.redis.host=localhost
-spring.data.redis.port=6379
-spring.data.redis.timeout=1s
-spring.data.redis.connect-timeout=1s
-
-# Actuator Exposure
-management.endpoints.web.exposure.include=health,info
 ```
 
----
+This means:
 
-## 🚀 Setup & Execution Instructions
+- Maximum bucket capacity: **5 tokens**
+- Refill rate: **1 token per second**
+- Redis state TTL: **60 seconds**
 
-### Prerequisites
-- **Java 21**
-- **Maven 3.8+**
-- **Docker & Docker Compose**
+### Example
 
----
-
-### Running Locally (Native Maven)
-
-1. **Start Redis**:
-   ```bash
-   redis-server
-   ```
-
-2. **Build backend**:
-   ```bash
-   cd backend
-   mvn clean package -DskipTests
-   ```
-
-3. **Run application**:
-   ```bash
-   mvn spring-boot:run
-   ```
-
----
-
-### Running with Docker Compose
-
-1. **Navigate to backend**:
-   ```bash
-   cd backend
-   ```
-
-2. **Build image & launch containers**:
-   ```bash
-   mvn clean package -DskipTests
-   docker compose up --build
-   ```
-
-3. **Stop containers**:
-   ```bash
-   docker compose down
-   ```
-
----
-
-## 📡 API Behavior & Response Examples
-
-### 1. Allowed Request (`200 OK`)
-
-**Request**:
-```bash
-curl -i http://localhost:8080/hello
-```
-
-**Response Headers**:
-```http
-HTTP/1.1 200 OK
-X-RateLimit-Remaining: 4
-Content-Type: text/plain;charset=UTF-8
-```
-
-**Body**:
 ```text
-request Accepted
+Initial Bucket
+
+[ ● ● ● ● ● ]  = 5 tokens
+
+Request 1 → 200 → 4 tokens
+Request 2 → 200 → 3 tokens
+Request 3 → 200 → 2 tokens
+Request 4 → 200 → 1 token
+Request 5 → 200 → 0 tokens
+
+Request 6 → 429 Too Many Requests
+
+Wait 1 second
+
+[ ● ○ ○ ○ ○ ]  = 1 token restored
+
+Request 7 → 200
 ```
 
 ---
 
-### 2. Rate Limited Request (`429 Too Many Requests`)
+# 🧪 Live Token Bucket Demonstration
 
-**Request** (when bucket is empty):
-```bash
-curl -i http://localhost:8080/hello
+The following test was performed against the running application.
+
+### Requests 1–5
+
+All five requests are accepted.
+
+```text
+Request 1 → 200 → Remaining: 4
+Request 2 → 200 → Remaining: 3
+Request 3 → 200 → Remaining: 2
+Request 4 → 200 → Remaining: 1
+Request 5 → 200 → Remaining: 0
 ```
 
-**Response Headers**:
-```http
-HTTP/1.1 429 Too Many Requests
+### Request 6
+
+The bucket is empty.
+
+```text
+HTTP/1.1 429
+X-RateLimit-Remaining: 0
+Retry-After: 1
+
+{
+  "error": "Too many requests",
+  "status": 429,
+  "retryAfter": 1
+}
+```
+
+### After waiting one second
+
+A token is refilled and another request is allowed.
+
+```text
+Request 7 → HTTP 200
+```
+
+---
+
+# 📸 Proof of Execution
+
+## Token Bucket Behaviour
+
+![Terminal Token Bucket Test](docs/images/token-bucket-test.png)
+
+The terminal demonstrates the complete flow:
+
+1. Five requests are accepted.
+2. The sixth request receives HTTP `429`.
+3. The server returns `Retry-After: 1`.
+4. After one second, a token is refilled.
+5. The next request succeeds.
+
+---
+
+## HTTP 429 Too Many Requests
+
+![429 Response](docs/images/rate-limit-429.png)
+
+The browser network inspector confirms:
+
+```text
+Status Code: 429 Too Many Requests
 Retry-After: 1
 X-RateLimit-Remaining: 0
-Content-Type: application/json;charset=UTF-8
 ```
 
-**Body**:
+The response body is:
+
 ```json
 {
   "error": "Too many requests",
@@ -231,20 +215,372 @@ Content-Type: application/json;charset=UTF-8
 
 ---
 
-### 3. Redis Failure (`503 Service Unavailable`)
+## Redis Failure Handling
 
-**Request** (when Redis container is stopped):
+If Redis becomes unavailable, the application does not expose an internal `500` error.
+
+Instead, the rate limiter fails gracefully:
+
+```text
+HTTP/1.1 503 Service Unavailable
+```
+
+![503 Redis Failure](docs/images/redis-503.png)
+
+Response:
+
+```json
+{
+  "error": "Rate limiter temporarily unavailable",
+  "status": 503,
+  "message": "Please try again later"
+}
+```
+
+This behaviour is important because the rate limiter itself should not cause uncontrolled application failures.
+
+---
+
+## Successful Request
+
+![200 Successful Request](docs/images/request-200.png)
+
+Successful requests return:
+
+```text
+HTTP 200 OK
+```
+
+With the remaining token count exposed through:
+
+```text
+X-RateLimit-Remaining
+```
+
+---
+
+## Automated Tests
+
+![Tests Passing](docs/images/tests-passing.png)
+
+The project includes unit, integration, and concurrency testing.
+
+Current verified scenarios include:
+
+- HTTP request allowed successfully
+- Initial token availability
+- Request rejected when bucket is empty
+- Token refilled after elapsed time
+- HTTP `429` response verification
+- `Retry-After` header verification
+- Concurrent request protection
+
+### Concurrency Test
+
+The application simulates **20 concurrent threads** attempting to access the limiter.
+
+```text
+20 Concurrent Requests
+        │
+        ▼
+  Rate Limiter
+        │
+        ▼
+Maximum 5 Requests Allowed
+```
+
+The test verifies that no more requests than the configured bucket capacity are permitted.
+
+---
+
+## Docker Deployment
+
+![Docker Containers Running](docs/images/docker-running.png)
+
+The application runs as two containers:
+
+```text
+┌─────────────────────────────┐
+│ Spring Boot Application     │
+│ Port: 8080                  │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│ Redis                       │
+│ Port: 6379                  │
+└─────────────────────────────┘
+```
+
+---
+
+# 🔄 Request Flow
+
+### 1. Request enters the application
+
+```text
+GET /hello
+```
+
+### 2. `RateLimiterFilter` intercepts the request
+
+The request is intercepted before reaching the controller.
+
+### 3. Client is identified
+
+Currently using:
+
+```java
+request.getRemoteAddr()
+```
+
+The client identifier is used to generate a Redis key.
+
+```text
+rate-limiter:<client-ip>
+```
+
+### 4. Lua script executes inside Redis
+
+The script:
+
+- Reads current tokens
+- Calculates elapsed time
+- Refills tokens
+- Checks token availability
+- Consumes a token if allowed
+- Stores the updated state
+
+All of this happens atomically.
+
+### 5. Request is either allowed or rejected
+
+```text
+Token Available?
+       │
+   ┌───┴────┐
+   │        │
+  YES       NO
+   │        │
+   ▼        ▼
+200 OK    429
+```
+
+---
+
+# 🧠 Why Lua Scripting?
+
+A normal rate limiter may require multiple Redis operations:
+
+```text
+GET tokens
+GET last refill
+Calculate tokens
+Update tokens
+Update refill time
+```
+
+Under concurrent requests, separate operations can create race conditions.
+
+Instead:
+
+```text
+Spring Boot
+     │
+     ▼
+Execute Lua Script
+     │
+     ▼
+Redis executes the entire
+Token Bucket operation atomically
+```
+
+This prevents multiple requests from simultaneously reading and consuming the same token.
+
+---
+
+# 📁 Project Structure
+
+```text
+Rate_Limiter/
+│
+├── README.md
+│
+├── docs/
+│   └── images/
+│
+└── backend/
+    ├── Dockerfile
+    ├── docker-compose.yml
+    ├── pom.xml
+    │
+    └── src/
+        ├── main/
+        │   ├── java/
+        │   │   └── RateLimter/example/RateLimter/
+        │   │       ├── RateLimterApplication.java
+        │   │       │
+        │   │       ├── config/
+        │   │       │   ├── RateLimiterProperties.java
+        │   │       │   └── RedisConfig.java
+        │   │       │
+        │   │       ├── controllers/
+        │   │       │   └── Controllers.java
+        │   │       │
+        │   │       ├── filters/
+        │   │       │   └── RateLimiterFilter.java
+        │   │       │
+        │   │       └── services/
+        │   │           ├── RateLimitResult.java
+        │   │           └── RateLimiterService.java
+        │   │
+        │   └── resources/
+        │       ├── application.properties
+        │       └── rate-limiter.lua
+        │
+        └── test/
+            └── RateLimiterServiceTest.java
+```
+
+---
+
+# ✨ Features
+
+- 🚦 Token Bucket rate limiting
+- 🌐 Distributed state management using Redis
+- 🔒 Atomic rate-limit calculations using Lua
+- 🧵 Concurrency testing
+- 🚫 HTTP `429 Too Many Requests`
+- ⏱️ `Retry-After` response header
+- 📊 `X-RateLimit-Remaining` response header
+- ❌ Structured JSON error responses
+- 🛡️ Graceful Redis failure handling with HTTP `503`
+- ⚙️ Configurable rate-limit parameters
+- 🔍 SLF4J logging
+- ❤️ Spring Boot Actuator health checks
+- 🐳 Dockerized Spring Boot application
+- 🟥 Dockerized Redis
+- 🔗 Docker Compose orchestration
+
+---
+
+# ⚙️ Configuration
+
+```properties
+spring.application.name=RateLimter
+
+# Rate Limiter
+rate.limiter.capacity=5
+rate.limiter.refill-rate=1
+rate.limiter.ttl=60
+
+# Redis
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
+spring.data.redis.timeout=1s
+spring.data.redis.connect-timeout=1s
+
+# Actuator
+management.endpoints.web.exposure.include=health,info
+```
+
+---
+
+# 🚀 Running Locally
+
+## Prerequisites
+
+- Java 21
+- Maven 3.8+
+- Redis
+- Docker
+
+### Start Redis
+
+```bash
+redis-server
+```
+
+### Build the application
+
+```bash
+cd backend
+mvn clean package -DskipTests
+```
+
+### Run
+
+```bash
+mvn spring-boot:run
+```
+
+Application:
+
+```text
+http://localhost:8080
+```
+
+---
+
+# 🐳 Running with Docker
+
+```bash
+cd backend
+mvn clean package -DskipTests
+docker compose up --build
+```
+
+Stop containers:
+
+```bash
+docker compose down
+```
+
+---
+
+# 📡 API Behaviour
+
+## Allowed Request
+
 ```bash
 curl -i http://localhost:8080/hello
 ```
 
-**Response Headers**:
-```http
-HTTP/1.1 503 Service Unavailable
-Content-Type: application/json;charset=UTF-8
+Example:
+
+```text
+HTTP/1.1 200 OK
+X-RateLimit-Remaining: 4
+
+request Accepted
 ```
 
-**Body**:
+---
+
+## Rate Limit Exceeded
+
+```text
+HTTP/1.1 429 Too Many Requests
+Retry-After: 1
+X-RateLimit-Remaining: 0
+```
+
+```json
+{
+  "error": "Too many requests",
+  "status": 429,
+  "retryAfter": 1
+}
+```
+
+---
+
+## Redis Unavailable
+
+```text
+HTTP/1.1 503 Service Unavailable
+```
+
 ```json
 {
   "error": "Rate limiter temporarily unavailable",
@@ -255,44 +591,63 @@ Content-Type: application/json;charset=UTF-8
 
 ---
 
-### 4. Health Check
-
-```bash
-curl -i http://localhost:8080/actuator/health
-```
-
----
-
-## 🧪 Testing
-
-Testing suite is located in `RateLimiterServiceTest.java`:
+# 🧪 Running Tests
 
 ```bash
 cd backend
 mvn test
 ```
 
-### Verified Test Scenarios:
-- **`shouldAllowHttpRequest`**: Validates `200 OK` on `/hello`.
-- **`cheackIfTheUserAsTheToken`**: Confirms initial token availability.
-- **`cheackForFalse`**: Verifies rate limit rejection after 5 requests.
-- **`cheackTheRefill`**: Validates token replenishment after a 1-second delay.
-- **`shouldReturn429AfterLimitIsReached`**: Tests HTTP status 429 via `MockMvc` for remote IP.
-- **`shouldReturnRetryAfterHeaderWhenLimitIsReached`**: Verifies presence of `Retry-After` header.
-- **`shouldNotAllowMoreThanCapacityUnderConcurrency`**: Simulates 20 concurrent threads using `ExecutorService` & `CountDownLatch` and asserts exactly 5 requests are permitted.
+The test suite includes:
+
+- Unit tests
+- HTTP integration tests
+- Header verification
+- Token refill verification
+- Concurrency testing
 
 ---
 
-## 🛠️ Failure Handling
+# 🔮 Future Improvements
 
-- **Redis Error Handling**: `RateLimiterService` catches Redis exceptions, logs them with SLF4J, and rethrows them to `RateLimiterFilter`, which transforms the failure into an HTTP `503 Service Unavailable` response.
-- **Short Connection Timeouts**: Redis `timeout` and `connect-timeout` set to `1s` to prevent connection starvation.
-- **Container Health Dependency**: Docker Compose `depends_on` ensures `rate-limiter-redis` is healthy (`redis-cli ping`) before `rate-limiter-app` initializes.
+- API-key-based client identification
+- JWT-based rate limiting
+- Per-user rate limits
+- Per-route configuration
+- Different limits for authenticated users
+- Fail-open and fail-closed strategies
+- Redis Cluster support
+- Metrics with Prometheus
+- Monitoring dashboards
+- Multiple rate-limiting strategies
 
 ---
 
-## 🚀 Possible Future Improvements
+# 🎯 What This Project Demonstrates
 
-- Client identification using API Keys or JWT claims (`X-API-Key` or `Authorization` header).
-- Per-route rate limiting configuration (e.g., custom capacity for specific endpoints).
-- Configurable fallback strategies (e.g., fail-open vs fail-closed via configuration property).
+This project demonstrates practical backend engineering concepts beyond basic CRUD development:
+
+```text
+Spring Boot
+    +
+Redis
+    +
+Distributed Systems
+    +
+Concurrency
+    +
+Lua Scripting
+    +
+HTTP Filters
+    +
+Docker
+    +
+Failure Handling
+    +
+Testing
+```
+
+---
+
+
+
