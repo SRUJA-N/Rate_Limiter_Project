@@ -3,8 +3,8 @@
 
 # 🚦 Distributed Rate Limiter
 
-> A production-style distributed rate limiter built with **Spring Boot 3, Redis, and Lua scripting**.  
-> Implements the **Token Bucket Algorithm** with atomic distributed state management, HTTP-level rate limiting, concurrency protection, Docker deployment, and graceful Redis failure handling.
+> A distributed rate limiter built with Spring Boot 4, Redis, and Lua scripting.
+> Implements the **Token Bucket Algorithm** with atomic distributed state management, HTTP-level rate limiting, atomic rate-limit enforcement and concurrency testing, Docker deployment, and graceful Redis failure handling.
 
 ## 📌 Overview
 
